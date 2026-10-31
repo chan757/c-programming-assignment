@@ -1,0 +1,15 @@
+#include <stdio.h>
+
+int main(void)
+{
+    int count;
+    int i;
+
+    scanf("%d", &count);
+
+    for (i = 0; i < count; i++) {
+        printf("Hello for loop\n");
+    }
+
+    return 0;
+}
