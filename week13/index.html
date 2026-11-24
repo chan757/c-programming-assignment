@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPS 경로 시각화</title>
+  <!-- Leaflet CSS (API 키 불필요) -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", sans-serif;
+    }
+    #map {
+      width: 100vw;
+      height: 100vh;
+    }
+    .info-panel {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      z-index: 1000;
+      background: rgba(255, 255, 255, 0.95);
+      padding: 14px 18px;
+      border-radius: 10px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+      min-width: 230px;
+      font-size: 14px;
+      line-height: 1.6;
+      color: #1f2937;
+    }
+    .info-panel h2 {
+      font-size: 16px;
+      margin-bottom: 6px;
+      color: #111827;
+    }
+    .legend {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid #e5e7eb;
+      font-size: 12px;
+      color: #4b5563;
+    }
+    .dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    .btn-fit {
+      margin-top: 10px;
+      width: 100%;
+      padding: 7px 10px;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-fit:hover {
+      background: #1d4ed8;
+    }
+    .error-text {
+      color: #dc2626;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="info-panel">
+    <h2>GPS 이동 경로 뷰어</h2>
+    <div id="status">output.json 불러오는 중...</div>
+    <div class="legend">
+      <div><span class="dot" style="background:#16a34a;"></span>출발 지점</div>
+      <div><span class="dot" style="background:#2563eb;"></span>경유 지점</div>
+      <div><span class="dot" style="background:#dc2626;"></span>도착 지점</div>
+    </div>
+    <button class="btn-fit" id="fitBtn" type="button">전체 경로 한눈에 보기</button>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script>
+    // 1. 지도 초기화
+    const map = L.map("map").setView([37.4563, 126.7052], 14);
+
+    // 2. OpenStreetMap 타일 레이어 추가 (무료, API 키 없음)
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
+
+    let routeBounds = null;
+
+    // 다양한 JSON 키 구조(lat/latitude, lng/lon/longitude 등)를 자동 추출
+    function normalizeCoordinates(rawData) {
+      let list = [];
+
+      if (Array.isArray(rawData)) {
+        list = rawData;
+      } else if (rawData && typeof rawData === "object") {
+        // { "gps": [...] }, { "data": [...] }, { "locations": [...] } 등의 래퍼 객체 처리
+        const arrayCandidate = Object.values(rawData).find((val) => Array.isArray(val));
+        if (arrayCandidate) list = arrayCandidate;
+      }
+
+      return list
+        .map((item, idx) => {
+          if (Array.isArray(item) && item.length >= 2) {
+            return { lat: parseFloat(item[0]), lng: parseFloat(item[1]), raw: item, index: idx };
+          }
+          if (item && typeof item === "object") {
+            const lat = parseFloat(item.lat ?? item.latitude ?? item.Lat ?? item.LAT);
+            const lng = parseFloat(item.lng ?? item.lon ?? item.longitude ?? item.Lng ?? item.Lon ?? item.LON);
+            return { lat, lng, raw: item, index: idx };
+          }
+          return null;
+        })
+        .filter((pt) => pt && !Number.isNaN(pt.lat) && !Number.isNaN(pt.lng));
+    }
+
+    // 팝업에 표시할 부가 정보(시간, 고도, 속도 등) 문자열 생성
+    function buildPopupHtml(point, totalCount) {
+      let label = `경유지 #${point.index + 1}`;
+      if (point.index === 0) label = "출발 지점 (#1)";
+      else if (point.index === totalCount - 1) label = `도착 지점 (#${totalCount})`;
+
+      let extra = "";
+      if (point.raw && typeof point.raw === "object" && !Array.isArray(point.raw)) {
+        for (const [key, value] of Object.entries(point.raw)) {
+          if (!["lat", "latitude", "lng", "lon", "longitude"].includes(key.toLowerCase())) {
+            extra += `<br><strong>${key}:</strong> ${value}`;
+          }
+        }
+      }
+
+      return `
+        <div style="font-size:13px; line-height:1.5;">
+          <strong>${label}</strong><br>
+          위도(Lat): ${point.lat}<br>
+          경도(Lng): ${point.lng}${extra}
+        </div>
+      `;
+    }
+
+    // 3. output.json 로드 및 시각화
+    async function loadGpsData() {
+      const statusEl = document.getElementById("status");
+
+      try {
+        // C 프로그램으로 파일을 다시 생성했을 때 즉시 반영되도록 캐시 비활성화
+        const response = await fetch("./output.json", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`HTTP 오류 (${response.status})`);
+        }
+
+        const jsonData = await response.json();
+        const points = normalizeCoordinates(jsonData);
+
+        if (points.length === 0) {
+          statusEl.innerHTML = `<span class="error-text">유효한 위도·경도 데이터를 찾지 못했습니다.</span>`;
+          return;
+        }
+
+        const latLngs = points.map((p) => [p.lat, p.lng]);
+
+        // 이동 경로 선(Polyline) 그리기
+        const polyline = L.polyline(latLngs, {
+          color: "#2563eb",
+          weight: 4,
+          opacity: 0.85
+        }).addTo(map);
+
+        // 각 GPS 좌표 마커 표시
+        points.forEach((pt, idx) => {
+          const isStart = idx === 0;
+          const isEnd = idx === points.length - 1 && points.length > 1;
+
+          const markerColor = isStart ? "#16a34a" : isEnd ? "#dc2626" : "#2563eb";
+          const radius = isStart || isEnd ? 8 : 4;
+
+          L.circleMarker([pt.lat, pt.lng], {
+            radius: radius,
+            color: "#ffffff",
+            weight: 2,
+            fillColor: markerColor,
+            fillOpacity: 0.95
+          })
+            .bindPopup(buildPopupHtml(pt, points.length))
+            .addTo(map);
+        });
+
+        // 전체 경로가 화면에 들어오도록 자동 줌 조절
+        if (latLngs.length === 1) {
+          map.setView(latLngs[0], 16);
+        } else {
+          routeBounds = polyline.getBounds();
+          map.fitBounds(routeBounds, { padding: [50, 50] });
+        }
+
+        statusEl.innerHTML = `총 <strong>${points.length}개</strong>의 GPS 좌표 로드 완료`;
+      } catch (err) {
+        console.error(err);
+        statusEl.innerHTML = `<span class="error-text">output.json 로드 실패: ${err.message}</span>`;
+      }
+    }
+
+    document.getElementById("fitBtn").addEventListener("click", () => {
+      if (routeBounds) {
+        map.fitBounds(routeBounds, { padding: [50, 50] });
+      }
+    });
+
+    loadGpsData();
+  </script>
+</body>
+</html>
